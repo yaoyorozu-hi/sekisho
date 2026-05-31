@@ -1,0 +1,101 @@
+name: Publish crates to crates.io (hardened)
+description: >-
+  Audited, OIDC-based publish gate for tsukai-mcp Rust crates. Mints a
+  short-lived crates.io Trusted Publishing token, then publishes the given
+  workspace packages in dependency order, waiting for index propagation
+  between packages. No long-lived CARGO_REGISTRY_TOKEN.
+
+inputs:
+  packages:
+    description: >-
+      Space-separated crate names in dependency/publish order
+      (e.g. "tsukai-manifest tsukai-manifest-cli"). The library must precede
+      any crate that depends on it so the just-published version is resolvable.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    # NOTE: harden-runner is intentionally NOT run here. It must be the FIRST
+    # step of the JOB and is unreliable when nested inside a composite action,
+    # so the caller's publish.yml runs it as its first job step. See README.md.
+
+    - name: Checkout
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      with:
+        persist-credentials: false
+
+    - name: Install Rust toolchain (stable)
+      shell: bash
+      run: |
+        rustup toolchain install stable --profile minimal
+        rustup default stable
+
+    - name: Mint crates.io OIDC token
+      id: auth
+      uses: rust-lang/crates-io-auth-action@bbd81622f20ce9e2dd9622e3218b975523e45bbe # v1.0.4
+
+    - name: Publish packages in order
+      shell: bash
+      env:
+        # Short-lived token from the OIDC mint step. Its post step auto-revokes
+        # it when the job ends. Mask it so it never appears in logs.
+        CRATES_TOKEN: ${{ steps.auth.outputs.token }}
+      run: |
+        set -euo pipefail
+        echo "::add-mask::${CRATES_TOKEN}"
+
+        packages="${{ inputs.packages }}"
+        if [ -z "${packages// }" ]; then
+          echo "::error::no packages provided to sekisho publish action"
+          exit 1
+        fi
+
+        # crates.io sparse index host for propagation polling.
+        index_base="https://index.crates.io"
+
+        # Derive the sparse-index path for a crate name per the cargo index
+        # layout (1/, 2/, 3/<first-char>/, then <a..><b..>/ for 4+ chars).
+        index_path() {
+          name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+          len="${#name}"
+          case "$len" in
+            1) printf '1/%s' "$name" ;;
+            2) printf '2/%s' "$name" ;;
+            3) printf '3/%s/%s' "${name:0:1}" "$name" ;;
+            *) printf '%s/%s/%s' "${name:0:2}" "${name:2:2}" "$name" ;;
+          esac
+        }
+
+        # Wait until a crate is resolvable on the sparse index before publishing
+        # the next package (which may depend on it). Indexing is not instant.
+        wait_for_index() {
+          pkg="$1"
+          url="${index_base}/$(index_path "$pkg")"
+          echo "Waiting for ${pkg} to appear on the crates.io sparse index (${url})"
+          for attempt in $(seq 1 30); do
+            if curl -sfL --retry 3 -o /dev/null "$url"; then
+              echo "${pkg} is present on the index (attempt ${attempt})."
+              # Brief settle so cargo's local cache sees it on the next resolve.
+              sleep 5
+              return 0
+            fi
+            echo "  not indexed yet (attempt ${attempt}/30); waiting 10s"
+            sleep 10
+          done
+          echo "::warning::${pkg} not observed on the index after retries; proceeding anyway"
+          return 0
+        }
+
+        # shellcheck disable=SC2086
+        set -- $packages
+        prev=""
+        for pkg in "$@"; do
+          if [ -n "$prev" ]; then
+            wait_for_index "$prev"
+          fi
+          echo "::group::cargo publish -p ${pkg}"
+          cargo publish -p "$pkg" --locked --token "$CRATES_TOKEN"
+          echo "::endgroup::"
+          prev="$pkg"
+        done
