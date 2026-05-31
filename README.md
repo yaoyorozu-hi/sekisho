@@ -1,22 +1,20 @@
 # sekisho
 
-**関所** — the hardened release gate for the [tsukai-mcp](https://github.com/tsukai-mcp) Rust crates.
+**関所** — a hardened, reusable release gate for publishing Rust crates to crates.io.
 
-A *sekisho* was an Edo-era inspection checkpoint on the highways: everything passing through was examined at a single, controlled, well-watched point. This repo is that checkpoint for publishing — the one audited path through which tsukai-mcp crates reach crates.io.
+A *sekisho* was an Edo-era inspection checkpoint on the highways: everything passing through was examined at a single, controlled, well-watched point. This repo is that checkpoint for publishing — one audited path through which a crate reaches crates.io.
+
+It is **generic and reusable**: any Rust repo or workspace can consume it. It lives in the [`yaoyorozu-hi`](https://github.com/yaoyorozu-hi) org as shared release-gate tooling.
 
 ## What this is
 
-`sekisho` provides a **composite GitHub Action** (`action.yml` at the repo root) that publishes crates to [crates.io](https://crates.io) via **OIDC Trusted Publishing** — no long-lived `CARGO_REGISTRY_TOKEN`. Consuming repos call it from a SHA-pinned step inside their own `publish.yml`:
-
-- [`tsukai-manifest`](https://github.com/tsukai-mcp/tsukai-manifest)
-- [`tsukai`](https://github.com/tsukai-mcp/tsukai)
-- [`tsukai-derive`](https://github.com/tsukai-mcp/tsukai-derive)
+`sekisho` provides a **composite GitHub Action** (`action.yml` at the repo root) that publishes crates to [crates.io](https://crates.io) via **OIDC Trusted Publishing** — no long-lived `CARGO_REGISTRY_TOKEN`. A consuming repo calls it from a SHA-pinned step inside its own `publish.yml`.
 
 ### Why a composite action and not a reusable workflow
 
 crates.io Trusted Publishing matches the **caller** workflow's `workflow_ref` and `environment` claim — it does **not** look at `job_workflow_ref`. So the trust anchor registered on crates.io is the *consuming repo's own* `publish.yml` plus its `environment: release`; sekisho's location is invisible to Trusted Publishing.
 
-A reusable-workflow (`uses:` at the job level via `workflow_call`) caller job **cannot** declare `environment:`. Trusted Publishing requires the environment claim on the job that mints the OIDC token. Therefore sekisho ships a **composite action**, invoked from a normal job in each crate's `publish.yml` — a job that declares `environment: release` and `id-token: write` itself.
+A reusable-workflow (`uses:` at the job level via `workflow_call`) caller job **cannot** declare `environment:`. Trusted Publishing requires the environment claim on the job that mints the OIDC token. Therefore sekisho ships a **composite action**, invoked from a normal job in each consuming repo's `publish.yml` — a job that declares `environment: release` and `id-token: write` itself.
 
 ## What the action does
 
@@ -24,7 +22,7 @@ Inputs:
 
 | Input | Required | Description |
 |-------|----------|-------------|
-| `packages` | yes | Space-separated crate names in dependency/publish order, e.g. `"tsukai-manifest tsukai-manifest-cli"`. The library must come before any crate that depends on it. |
+| `packages` | yes | Space-separated crate names in dependency/publish order, e.g. `"my-crate my-crate-cli"`. The library must come before any crate that depends on it. |
 
 Steps (composite):
 
@@ -35,11 +33,11 @@ Steps (composite):
 
 ## harden-runner placement (important)
 
-[`step-security/harden-runner`](https://github.com/step-security/harden-runner) **must be the first step of the job**, and nesting it inside a composite action is unreliable. So this action does **not** run harden-runner. The consuming `publish.yml` must run it as the first step of the publish job, before the `uses: tsukai-mcp/sekisho@<sha>` step.
+[`step-security/harden-runner`](https://github.com/step-security/harden-runner) **must be the first step of the job**, and nesting it inside a composite action is unreliable. So this action does **not** run harden-runner. The consuming `publish.yml` must run it as the first step of the publish job, before the `uses: yaoyorozu-hi/sekisho@<sha>` step.
 
-## How to consume it
+## To use sekisho in a repo
 
-In the crate repo, add `.github/workflows/publish.yml`. The tag (created by release-plz or by hand) is what triggers it:
+In the consuming repo, add `.github/workflows/publish.yml`. The tag (created by release-plz or by hand) is what triggers it:
 
 ```yaml
 name: publish
@@ -68,19 +66,19 @@ jobs:
             static.crates.io:443
             index.crates.io:443
             static.rust-lang.org:443
-      - uses: tsukai-mcp/sekisho@<full-sha>   # pin to a full commit SHA, never a tag
+      - uses: yaoyorozu-hi/sekisho@<full-sha>   # pin to a full commit SHA, never a tag
         with:
-          packages: "tsukai-manifest tsukai-manifest-cli"
+          packages: "your-crate your-crate-cli"
 ```
 
-Pin the `tsukai-mcp/sekisho@<sha>` reference to a **full commit SHA**, never a mutable tag — that is the gate, and it must not be swappable underneath callers.
+Pin the `yaoyorozu-hi/sekisho@<sha>` reference to a **full commit SHA**, never a mutable tag — that is the gate, and it must not be swappable underneath callers.
 
 ## crates.io Trusted Publishing setup (required, out of band)
 
 For **each** crate published through this action, configure Trusted Publishing on crates.io (crate Settings → Trusted Publishing → GitHub):
 
-- **Repository owner:** `tsukai-mcp`
-- **Repository name:** the consuming crate repo (e.g. `tsukai-manifest`)
+- **Repository owner:** the consuming repo's org (e.g. `yaoyorozu-hi`)
+- **Repository name:** the consuming crate repo
 - **Workflow filename:** `publish.yml` (the caller — *not* anything in sekisho)
 - **Environment:** `release`
 
