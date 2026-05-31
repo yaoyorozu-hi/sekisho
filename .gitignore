@@ -1,0 +1,13 @@
+# Rust build output (none expected here, but harmless)
+/target
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
