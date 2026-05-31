@@ -1,16 +1,16 @@
-name: Publish crates to crates.io (hardened)
+name: Hardened crates.io publish (OIDC Trusted Publishing)
 description: >-
-  Audited, OIDC-based publish gate for tsukai-mcp Rust crates. Mints a
-  short-lived crates.io Trusted Publishing token, then publishes the given
-  workspace packages in dependency order, waiting for index propagation
+  Hardened crates.io publish via OIDC Trusted Publishing for Rust crates.
+  Mints a short-lived crates.io Trusted Publishing token, then publishes the
+  given workspace packages in dependency order, waiting for index propagation
   between packages. No long-lived CARGO_REGISTRY_TOKEN.
 
 inputs:
   packages:
     description: >-
       Space-separated crate names in dependency/publish order
-      (e.g. "tsukai-manifest tsukai-manifest-cli"). The library must precede
-      any crate that depends on it so the just-published version is resolvable.
+      (e.g. "my-crate my-crate-cli"). The library must precede any crate that
+      depends on it so the just-published version is resolvable.
     required: true
 
 runs:
