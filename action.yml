@@ -41,11 +41,15 @@ runs:
         # Short-lived token from the OIDC mint step. Its post step auto-revokes
         # it when the job ends. Mask it so it never appears in logs.
         CRATES_TOKEN: ${{ steps.auth.outputs.token }}
+        # Pass the input via env rather than interpolating it into the script,
+        # so it cannot inject shell syntax.
+        PACKAGES: ${{ inputs.packages }}
       run: |
         set -euo pipefail
         echo "::add-mask::${CRATES_TOKEN}"
 
-        packages="${{ inputs.packages }}"
+        # shellcheck disable=SC2153  # PACKAGES is set by the step env block
+        packages="$PACKAGES"
         if [ -z "${packages// }" ]; then
           echo "::error::no packages provided to sekisho publish action"
           exit 1
@@ -57,6 +61,7 @@ runs:
         # Derive the sparse-index path for a crate name per the cargo index
         # layout (1/, 2/, 3/<first-char>/, then <a..><b..>/ for 4+ chars).
         index_path() {
+          local name len
           name="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
           len="${#name}"
           case "$len" in
@@ -70,6 +75,7 @@ runs:
         # Wait until a crate is resolvable on the sparse index before publishing
         # the next package (which may depend on it). Indexing is not instant.
         wait_for_index() {
+          local pkg url attempt
           pkg="$1"
           url="${index_base}/$(index_path "$pkg")"
           echo "Waiting for ${pkg} to appear on the crates.io sparse index (${url})"
@@ -87,10 +93,47 @@ runs:
           return 0
         }
 
+        # Locked workspace version of a crate, parsed from its package ID
+        # (path+file:///...#0.1.1 or path+file:///...#name@0.1.1).
+        crate_version() {
+          cargo pkgid --locked -p "$1" | sed -e 's/.*#//' -e 's/.*@//'
+        }
+
+        # A crate@version is already published if the sparse index lists that
+        # exact version. Makes reruns resumable after a partial publish instead
+        # of failing with "crate version already exists".
+        #
+        # Returns 0 = published, 1 = definitively absent (HTTP 404, the crate
+        # has no index entry yet). Any other curl failure (DNS/conn/timeout —
+        # exit 6/7/28, etc.) is indeterminate: we must NOT assume "absent" and
+        # republish a crate that may already exist, so abort loudly. --retry 3
+        # already covers transient 5xx/429 but not 404 or connection errors.
+        already_published() {
+          local pkg version url body rc
+          pkg="$1"
+          version="$2"
+          url="${index_base}/$(index_path "$pkg")"
+          body="$(curl -sfL --retry 3 "$url")" && rc=0 || rc=$?
+          if [ "$rc" -eq 22 ]; then
+            return 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::could not query the crates.io index for ${pkg} (curl exit ${rc}); refusing to assume it is unpublished"
+            exit 1
+          fi
+          printf '%s\n' "$body" | grep -qF "\"vers\":\"${version}\""
+        }
+
         # shellcheck disable=SC2086
         set -- $packages
         prev=""
         for pkg in "$@"; do
+          version="$(crate_version "$pkg")"
+          if already_published "$pkg" "$version"; then
+            echo "${pkg}@${version} is already on crates.io; skipping."
+            prev="$pkg"
+            continue
+          fi
           if [ -n "$prev" ]; then
             wait_for_index "$prev"
           fi
